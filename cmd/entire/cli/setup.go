@@ -53,6 +53,7 @@ func newEnableCmd() *cobra.Command {
 	var forceHooks bool
 	var skipPushSessions bool
 	var telemetry bool
+	var userHooks bool
 
 	cmd := &cobra.Command{
 		Use:   "enable",
@@ -96,7 +97,7 @@ Strategies: manual-commit (default), auto-commit`,
 					printWrongAgentError(cmd.ErrOrStderr(), agentName)
 					return NewSilentError(errors.New("wrong agent name"))
 				}
-				return setupAgentHooksNonInteractive(cmd.OutOrStdout(), ag, strategyFlag, localDev, forceHooks, skipPushSessions, telemetry)
+				return setupAgentHooksNonInteractive(cmd.OutOrStdout(), ag, strategyFlag, localDev, forceHooks, skipPushSessions, telemetry, userHooks)
 			}
 			// Check if already fully enabled before prompting for agents.
 			// Only applies to interactive path (no --strategy flag) with no config flags.
@@ -121,9 +122,9 @@ Strategies: manual-commit (default), auto-commit`,
 			}
 
 			if strategyFlag != "" {
-				return runEnableWithStrategy(cmd.OutOrStdout(), agents, strategyFlag, localDev, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
+				return runEnableWithStrategy(cmd.OutOrStdout(), agents, strategyFlag, localDev, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry, userHooks)
 			}
-			return runEnableInteractive(cmd.OutOrStdout(), agents, localDev, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry)
+			return runEnableInteractive(cmd.OutOrStdout(), agents, localDev, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry, userHooks)
 		},
 	}
 
@@ -138,6 +139,7 @@ Strategies: manual-commit (default), auto-commit`,
 	cmd.Flags().BoolVarP(&forceHooks, "force", "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&skipPushSessions, "skip-push-sessions", false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().BoolVar(&telemetry, "telemetry", true, "Enable anonymous usage analytics")
+	cmd.Flags().BoolVar(&userHooks, "user-hooks", false, "Install user-level hooks for subdirectory support")
 	//nolint:errcheck,gosec // completion is optional, flag is defined above
 	cmd.RegisterFlagCompletionFunc("strategy", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return []string{strategyDisplayManualCommit, strategyDisplayAutoCommit}, cobra.ShellCompDirectiveNoFileComp
@@ -243,7 +245,7 @@ func isFullyEnabled() (enabled bool, agentDesc string, configPath string) {
 // The selectedStrategy can be either a display name (manual-commit, auto-commit)
 // or an internal name (manual-commit, auto-commit).
 // agents must be provided by the caller (via detectOrSelectAgent).
-func runEnableWithStrategy(w io.Writer, agents []agent.Agent, selectedStrategy string, localDev, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
+func runEnableWithStrategy(w io.Writer, agents []agent.Agent, selectedStrategy string, localDev, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry, userHooks bool) error {
 	// Map the strategy to internal name if it's a display name
 	internalStrategy := selectedStrategy
 	if mapped, ok := strategyDisplayToInternal[selectedStrategy]; ok {
@@ -263,11 +265,9 @@ func runEnableWithStrategy(w io.Writer, agents []agent.Agent, selectedStrategy s
 		}
 	}
 
-	// Install user-level fallback hooks so Entire works when agents start from subdirectories.
-	// User-level hooks fire globally but exit early in non-Entire projects (IsEntireProject check).
-	// When project-level hooks also fire, user-level hooks deduplicate via ENTIRE_USER_LEVEL_HOOK env var.
-	// Skipped in local-dev mode since user-level hooks need the binary in PATH.
-	if !localDev {
+	// Install user-level fallback hooks if requested via --user-hooks flag.
+	// These allow Entire to work when agents start from subdirectories.
+	if userHooks && !localDev {
 		setupUserLevelHooks(w, agents)
 	}
 
@@ -347,7 +347,7 @@ func runEnableWithStrategy(w io.Writer, agents []agent.Agent, selectedStrategy s
 // runEnableInteractive runs the interactive enable flow.
 // agents must be provided by the caller (via detectOrSelectAgent).
 // The isFullyEnabled check is handled by the caller before agent detection.
-func runEnableInteractive(w io.Writer, agents []agent.Agent, localDev, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry bool) error {
+func runEnableInteractive(w io.Writer, agents []agent.Agent, localDev, useLocalSettings, useProjectSettings, forceHooks, skipPushSessions, telemetry, userHooks bool) error {
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
 		if _, err := setupAgentHooks(ag, localDev, forceHooks); err != nil {
@@ -431,6 +431,19 @@ func runEnableInteractive(w io.Writer, agents []agent.Agent, localDev, useLocalS
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 
+	// Prompt for user-level hooks (subdirectory support) if not already decided via flag
+	if !localDev {
+		if userHooks {
+			// Flag explicitly set — install without prompting
+			setupUserLevelHooks(w, agents)
+		} else if !anyUserLevelHooksInstalled(agents) {
+			// Only prompt if user-level hooks aren't already installed
+			if err := promptUserLevelHooks(w, agents); err != nil {
+				return fmt.Errorf("user-level hooks prompt: %w", err)
+			}
+		}
+	}
+
 	// Let the strategy handle its own setup requirements
 	strat, err := strategy.Get(internalStrategy)
 	if err != nil {
@@ -443,6 +456,44 @@ func runEnableInteractive(w io.Writer, agents []agent.Agent, localDev, useLocalS
 	fmt.Fprintln(w, "\nReady.")
 
 	return nil
+}
+
+// promptUserLevelHooks asks the user if they want to install user-level hooks
+// so Entire works when agents are started from repository subdirectories.
+func promptUserLevelHooks(w io.Writer, agents []agent.Agent) error {
+	var install bool
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Install user-level hooks?").
+				Description("Allows Entire to work when agents start from subdirectories.").
+				Affirmative("Yes").
+				Negative("No").
+				Value(&install),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		return fmt.Errorf("user-level hooks prompt: %w", err)
+	}
+
+	if install {
+		setupUserLevelHooks(w, agents)
+	}
+
+	return nil
+}
+
+// anyUserLevelHooksInstalled checks if any of the given agents already have user-level hooks installed.
+func anyUserLevelHooksInstalled(agents []agent.Agent) bool {
+	for _, ag := range agents {
+		if userHook, ok := ag.(agent.UserLevelHookSupport); ok {
+			if userHook.AreUserLevelHooksInstalled() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // runEnable is a simple enable that just sets the enabled flag (for programmatic use).
@@ -698,7 +749,7 @@ func printWrongAgentError(w io.Writer, name string) {
 
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
-func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName string, localDev, forceHooks, skipPushSessions, telemetry bool) error {
+func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName string, localDev, forceHooks, skipPushSessions, telemetry, userHooks bool) error {
 	agentName := ag.Name()
 	// Check if agent supports hooks
 	hookAgent, ok := ag.(agent.HookSupport)
@@ -714,8 +765,8 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
 	}
 
-	// Install user-level fallback hooks (skipped in local-dev mode)
-	if !localDev {
+	// Install user-level fallback hooks if requested via --user-hooks flag.
+	if userHooks && !localDev {
 		setupUserLevelHooks(w, []agent.Agent{ag})
 	}
 

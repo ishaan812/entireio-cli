@@ -360,7 +360,7 @@ func TestRunEnableWithStrategy_PreservesExistingSettings(t *testing.T) {
 	// Run enable with a different strategy — pass agents directly (no TTY needed)
 	defaultAgent := agent.Default()
 	var stdout bytes.Buffer
-	err := runEnableWithStrategy(&stdout, []agent.Agent{defaultAgent}, "auto-commit", false, false, true, false, false, false)
+	err := runEnableWithStrategy(&stdout, []agent.Agent{defaultAgent}, "auto-commit", false, false, true, false, false, false, false)
 	if err != nil {
 		t.Fatalf("runEnableWithStrategy() error = %v", err)
 	}
@@ -405,7 +405,7 @@ func TestRunEnableWithStrategy_PreservesLocalSettings(t *testing.T) {
 	// Run enable with --local flag — pass agents directly (no TTY needed)
 	defaultAgent := agent.Default()
 	var stdout bytes.Buffer
-	err := runEnableWithStrategy(&stdout, []agent.Agent{defaultAgent}, "auto-commit", false, true, false, false, false, false)
+	err := runEnableWithStrategy(&stdout, []agent.Agent{defaultAgent}, "auto-commit", false, true, false, false, false, false, false)
 	if err != nil {
 		t.Fatalf("runEnableWithStrategy() error = %v", err)
 	}
