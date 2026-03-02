@@ -1,7 +1,9 @@
 package settings
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -139,4 +141,55 @@ func TestLoad_LocalSettingsRejectsUnknownKeys(t *testing.T) {
 func containsUnknownField(msg string) bool {
 	// Go's json package reports unknown fields with this message format
 	return strings.Contains(msg, "unknown field")
+}
+
+func TestExists_ReturnsTrueWhenSettingsFileExists(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize a real git repo (required for paths.RepoRoot)
+	cmd := exec.CommandContext(context.Background(), "git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"strategy":"manual-commit","enabled":true}`), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	if !Exists() {
+		t.Error("Exists() = false, want true when settings file exists")
+	}
+}
+
+func TestExists_ReturnsFalseWhenSettingsFileMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Initialize a real git repo (required for paths.RepoRoot)
+	cmd := exec.CommandContext(context.Background(), "git", "init")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	if Exists() {
+		t.Error("Exists() = true, want false when settings file is missing")
+	}
+}
+
+func TestExists_ReturnsFalseOutsideGitRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	// No .git directory
+
+	t.Chdir(tmpDir)
+	if Exists() {
+		t.Error("Exists() = true, want false outside git repo")
+	}
 }

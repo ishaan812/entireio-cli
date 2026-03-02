@@ -13,10 +13,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Ensure ClaudeCodeAgent implements HookSupport and HookHandler
+// Ensure ClaudeCodeAgent implements HookSupport, HookHandler, and UserLevelHookSupport
 var (
-	_ agent.HookSupport = (*ClaudeCodeAgent)(nil)
-	_ agent.HookHandler = (*ClaudeCodeAgent)(nil)
+	_ agent.HookSupport          = (*ClaudeCodeAgent)(nil)
+	_ agent.HookHandler          = (*ClaudeCodeAgent)(nil)
+	_ agent.UserLevelHookSupport = (*ClaudeCodeAgent)(nil)
 )
 
 // Claude Code hook names - these become subcommands under `entire hooks claude-code`
@@ -51,10 +52,15 @@ func (c *ClaudeCodeAgent) GetHookNames() []string {
 	}
 }
 
+// userLevelHookEnvPrefix is prepended to hook commands installed at the user level.
+// The hook handler checks this env var to deduplicate with project-level hooks.
+const userLevelHookEnvPrefix = "ENTIRE_USER_LEVEL_HOOK=1 "
+
 // entireHookPrefixes are command prefixes that identify Entire hooks (both old and new formats)
 var entireHookPrefixes = []string{
 	"entire ",
 	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go ",
+	userLevelHookEnvPrefix + "entire ",
 }
 
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
@@ -517,4 +523,226 @@ func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 func removeEntireHooksFromMatchers(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 	// Same logic as removeEntireHooks - both work on the same structure
 	return removeEntireHooks(matchers)
+}
+
+// userLevelSettingsPath returns the path to the user-level Claude Code settings file.
+func userLevelSettingsPath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".claude", ClaudeSettingsFileName), nil
+}
+
+// InstallUserLevelHooks installs Entire hooks at the user-level Claude Code settings
+// (~/.claude/settings.json) as a fallback for when Claude Code is started from a
+// repository subdirectory and cannot find project-level settings.
+// Hook commands are prefixed with ENTIRE_USER_LEVEL_HOOK=1 for deduplication.
+func (c *ClaudeCodeAgent) InstallUserLevelHooks() (int, error) {
+	settingsPath, err := userLevelSettingsPath()
+	if err != nil {
+		return 0, err
+	}
+
+	return installHooksAt(settingsPath, userLevelHookEnvPrefix+"entire hooks claude-code ", false)
+}
+
+// UninstallUserLevelHooks removes Entire hooks from user-level Claude Code settings.
+func (c *ClaudeCodeAgent) UninstallUserLevelHooks() error {
+	settingsPath, err := userLevelSettingsPath()
+	if err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from home dir + fixed path
+	if err != nil {
+		return nil //nolint:nilerr // No settings file means nothing to uninstall
+	}
+
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
+		return fmt.Errorf("failed to parse user-level settings.json: %w", err)
+	}
+
+	var rawHooks map[string]json.RawMessage
+	if hooksRaw, ok := rawSettings["hooks"]; ok {
+		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+			return fmt.Errorf("failed to parse hooks in user-level settings.json: %w", err)
+		}
+	}
+	if rawHooks == nil {
+		return nil // No hooks to remove
+	}
+
+	var sessionStart, sessionEnd, stop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
+	parseHookType(rawHooks, "SessionStart", &sessionStart)
+	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
+	parseHookType(rawHooks, "Stop", &stop)
+	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
+	parseHookType(rawHooks, "PreToolUse", &preToolUse)
+	parseHookType(rawHooks, "PostToolUse", &postToolUse)
+
+	sessionStart = removeEntireHooks(sessionStart)
+	sessionEnd = removeEntireHooks(sessionEnd)
+	stop = removeEntireHooks(stop)
+	userPromptSubmit = removeEntireHooks(userPromptSubmit)
+	preToolUse = removeEntireHooksFromMatchers(preToolUse)
+	postToolUse = removeEntireHooksFromMatchers(postToolUse)
+
+	marshalHookType(rawHooks, "SessionStart", sessionStart)
+	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
+	marshalHookType(rawHooks, "Stop", stop)
+	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
+	marshalHookType(rawHooks, "PreToolUse", preToolUse)
+	marshalHookType(rawHooks, "PostToolUse", postToolUse)
+
+	if len(rawHooks) > 0 {
+		hooksJSON, err := json.Marshal(rawHooks)
+		if err != nil {
+			return fmt.Errorf("failed to marshal hooks: %w", err)
+		}
+		rawSettings["hooks"] = hooksJSON
+	} else {
+		delete(rawSettings, "hooks")
+	}
+
+	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
+	}
+	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
+		return fmt.Errorf("failed to write user-level settings.json: %w", err)
+	}
+	return nil
+}
+
+// AreUserLevelHooksInstalled checks if Entire hooks are installed at the user level.
+func (c *ClaudeCodeAgent) AreUserLevelHooksInstalled() bool {
+	settingsPath, err := userLevelSettingsPath()
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from home dir + fixed path
+	if err != nil {
+		return false
+	}
+
+	var settings ClaudeSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false
+	}
+
+	return hookCommandExists(settings.Hooks.Stop, userLevelHookEnvPrefix+"entire hooks claude-code stop")
+}
+
+// installHooksAt installs Entire hooks at a specific settings file path.
+// cmdPrefix is the command prefix for hooks (e.g., "entire hooks claude-code " or
+// "ENTIRE_USER_LEVEL_HOOK=1 entire hooks claude-code ").
+func installHooksAt(settingsPath, cmdPrefix string, force bool) (int, error) { //nolint:unparam // cmdPrefix is parameterized for testability
+	var rawSettings map[string]json.RawMessage
+	var rawHooks map[string]json.RawMessage
+
+	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from known safe paths
+	if readErr == nil {
+		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
+			return 0, fmt.Errorf("failed to parse settings.json: %w", err)
+		}
+		if hooksRaw, ok := rawSettings["hooks"]; ok {
+			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+				return 0, fmt.Errorf("failed to parse hooks in settings.json: %w", err)
+			}
+		}
+	} else {
+		rawSettings = make(map[string]json.RawMessage)
+	}
+
+	if rawHooks == nil {
+		rawHooks = make(map[string]json.RawMessage)
+	}
+
+	var sessionStart, sessionEnd, stop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
+	parseHookType(rawHooks, "SessionStart", &sessionStart)
+	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
+	parseHookType(rawHooks, "Stop", &stop)
+	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
+	parseHookType(rawHooks, "PreToolUse", &preToolUse)
+	parseHookType(rawHooks, "PostToolUse", &postToolUse)
+
+	if force {
+		sessionStart = removeEntireHooks(sessionStart)
+		sessionEnd = removeEntireHooks(sessionEnd)
+		stop = removeEntireHooks(stop)
+		userPromptSubmit = removeEntireHooks(userPromptSubmit)
+		preToolUse = removeEntireHooksFromMatchers(preToolUse)
+		postToolUse = removeEntireHooksFromMatchers(postToolUse)
+	}
+
+	sessionStartCmd := cmdPrefix + "session-start"
+	sessionEndCmd := cmdPrefix + "session-end"
+	stopCmd := cmdPrefix + "stop"
+	userPromptSubmitCmd := cmdPrefix + "user-prompt-submit"
+	preTaskCmd := cmdPrefix + "pre-task"
+	postTaskCmd := cmdPrefix + "post-task"
+	postTodoCmd := cmdPrefix + "post-todo"
+
+	count := 0
+	if !hookCommandExists(sessionStart, sessionStartCmd) {
+		sessionStart = addHookToMatcher(sessionStart, "", sessionStartCmd)
+		count++
+	}
+	if !hookCommandExists(sessionEnd, sessionEndCmd) {
+		sessionEnd = addHookToMatcher(sessionEnd, "", sessionEndCmd)
+		count++
+	}
+	if !hookCommandExists(stop, stopCmd) {
+		stop = addHookToMatcher(stop, "", stopCmd)
+		count++
+	}
+	if !hookCommandExists(userPromptSubmit, userPromptSubmitCmd) {
+		userPromptSubmit = addHookToMatcher(userPromptSubmit, "", userPromptSubmitCmd)
+		count++
+	}
+	if !hookCommandExistsWithMatcher(preToolUse, "Task", preTaskCmd) {
+		preToolUse = addHookToMatcher(preToolUse, "Task", preTaskCmd)
+		count++
+	}
+	if !hookCommandExistsWithMatcher(postToolUse, "Task", postTaskCmd) {
+		postToolUse = addHookToMatcher(postToolUse, "Task", postTaskCmd)
+		count++
+	}
+	if !hookCommandExistsWithMatcher(postToolUse, "TodoWrite", postTodoCmd) {
+		postToolUse = addHookToMatcher(postToolUse, "TodoWrite", postTodoCmd)
+		count++
+	}
+
+	if count == 0 {
+		return 0, nil
+	}
+
+	marshalHookType(rawHooks, "SessionStart", sessionStart)
+	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
+	marshalHookType(rawHooks, "Stop", stop)
+	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
+	marshalHookType(rawHooks, "PreToolUse", preToolUse)
+	marshalHookType(rawHooks, "PostToolUse", postToolUse)
+
+	hooksJSON, err := json.Marshal(rawHooks)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
+	}
+	rawSettings["hooks"] = hooksJSON
+
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
+		return 0, fmt.Errorf("failed to create settings directory: %w", err)
+	}
+
+	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal settings: %w", err)
+	}
+	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
+		return 0, fmt.Errorf("failed to write settings.json: %w", err)
+	}
+
+	return count, nil
 }

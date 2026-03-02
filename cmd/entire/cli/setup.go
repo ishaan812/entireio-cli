@@ -256,11 +256,19 @@ func runEnableWithStrategy(w io.Writer, agents []agent.Agent, selectedStrategy s
 		return fmt.Errorf("unknown strategy: %s (use manual-commit or auto-commit)", selectedStrategy)
 	}
 
-	// Setup agent hooks for all selected agents
+	// Setup agent hooks for all selected agents (project-level)
 	for _, ag := range agents {
 		if _, err := setupAgentHooks(ag, localDev, forceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
+	}
+
+	// Install user-level fallback hooks so Entire works when agents start from subdirectories.
+	// User-level hooks fire globally but exit early in non-Entire projects (IsEntireProject check).
+	// When project-level hooks also fire, user-level hooks deduplicate via ENTIRE_USER_LEVEL_HOOK env var.
+	// Skipped in local-dev mode since user-level hooks need the binary in PATH.
+	if !localDev {
+		setupUserLevelHooks(w, agents)
 	}
 
 	// Setup .entire directory
@@ -704,6 +712,11 @@ func setupAgentHooksNonInteractive(w io.Writer, ag agent.Agent, strategyName str
 	installedHooks, err := hookAgent.InstallHooks(localDev, forceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to install hooks for %s: %w", agentName, err)
+	}
+
+	// Install user-level fallback hooks (skipped in local-dev mode)
+	if !localDev {
+		setupUserLevelHooks(w, []agent.Agent{ag})
 	}
 
 	// Setup .entire directory
@@ -1225,11 +1238,25 @@ func checkEntireDirExists() bool {
 	return err == nil
 }
 
+// setupUserLevelHooks installs user-level fallback hooks for all agents that support it.
+// This allows Entire to work when agents are started from repository subdirectories.
+func setupUserLevelHooks(w io.Writer, agents []agent.Agent) {
+	for _, ag := range agents {
+		if userHook, ok := ag.(agent.UserLevelHookSupport); ok {
+			if count, err := userHook.InstallUserLevelHooks(); err != nil {
+				fmt.Fprintf(w, "  Note: could not install user-level %s hooks: %v\n", ag.Type(), err)
+			} else if count > 0 {
+				fmt.Fprintf(w, "  Installed user-level %s hooks (subdirectory support)\n", ag.Type())
+			}
+		}
+	}
+}
+
 // removeAgentHooks removes hooks from all agents that support hooks.
 func removeAgentHooks(w io.Writer) error {
 	var errs []error
 
-	// Remove Claude Code hooks
+	// Remove Claude Code hooks (project-level and user-level)
 	claudeAgent, err := agent.Get(agent.AgentNameClaudeCode)
 	if err == nil {
 		if hookAgent, ok := claudeAgent.(agent.HookSupport); ok {
@@ -1240,9 +1267,17 @@ func removeAgentHooks(w io.Writer) error {
 				fmt.Fprintln(w, "  Removed Claude Code hooks")
 			}
 		}
+		if userHook, ok := claudeAgent.(agent.UserLevelHookSupport); ok {
+			wasInstalled := userHook.AreUserLevelHooksInstalled()
+			if err := userHook.UninstallUserLevelHooks(); err != nil {
+				errs = append(errs, err)
+			} else if wasInstalled {
+				fmt.Fprintln(w, "  Removed user-level Claude Code hooks")
+			}
+		}
 	}
 
-	// Remove Gemini CLI hooks
+	// Remove Gemini CLI hooks (project-level and user-level)
 	geminiAgent, err := agent.Get(agent.AgentNameGemini)
 	if err == nil {
 		if hookAgent, ok := geminiAgent.(agent.HookSupport); ok {
@@ -1251,6 +1286,14 @@ func removeAgentHooks(w io.Writer) error {
 				errs = append(errs, err)
 			} else if wasInstalled {
 				fmt.Fprintln(w, "  Removed Gemini CLI hooks")
+			}
+		}
+		if userHook, ok := geminiAgent.(agent.UserLevelHookSupport); ok {
+			wasInstalled := userHook.AreUserLevelHooksInstalled()
+			if err := userHook.UninstallUserLevelHooks(); err != nil {
+				errs = append(errs, err)
+			} else if wasInstalled {
+				fmt.Fprintln(w, "  Removed user-level Gemini CLI hooks")
 			}
 		}
 	}

@@ -655,3 +655,161 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 		}
 	}
 }
+
+// --- User-level hook tests ---
+
+func TestInstallUserLevelHooks_FreshInstall(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	settingsPath := filepath.Join(tempDir, ".claude", "settings.json")
+
+	count, err := installHooksAt(settingsPath, userLevelHookEnvPrefix+"entire hooks claude-code ", false)
+	if err != nil {
+		t.Fatalf("installHooksAt() error = %v", err)
+	}
+	if count != 7 {
+		t.Errorf("installHooksAt() count = %d, want 7", count)
+	}
+
+	// Verify settings file was created
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+
+	var settings ClaudeSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+
+	// Check that the stop hook has the user-level prefix
+	found := false
+	for _, matcher := range settings.Hooks.Stop {
+		for _, hook := range matcher.Hooks {
+			if hook.Command == "ENTIRE_USER_LEVEL_HOOK=1 entire hooks claude-code stop" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("expected user-level stop hook with ENTIRE_USER_LEVEL_HOOK=1 prefix")
+	}
+}
+
+func TestInstallUserLevelHooks_Idempotent(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	settingsPath := filepath.Join(tempDir, ".claude", "settings.json")
+
+	// Install twice
+	_, err := installHooksAt(settingsPath, userLevelHookEnvPrefix+"entire hooks claude-code ", false)
+	if err != nil {
+		t.Fatalf("first installHooksAt() error = %v", err)
+	}
+
+	count, err := installHooksAt(settingsPath, userLevelHookEnvPrefix+"entire hooks claude-code ", false)
+	if err != nil {
+		t.Fatalf("second installHooksAt() error = %v", err)
+	}
+	if count != 0 {
+		t.Errorf("second installHooksAt() count = %d, want 0 (idempotent)", count)
+	}
+}
+
+func TestInstallUserLevelHooks_PreservesExistingSettings(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	claudeDir := filepath.Join(tempDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	// Write existing user settings
+	if err := os.WriteFile(settingsPath, []byte(`{"customSetting": "value"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := installHooksAt(settingsPath, userLevelHookEnvPrefix+"entire hooks claude-code ", false)
+	if err != nil {
+		t.Fatalf("installHooksAt() error = %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify existing settings preserved
+	if _, ok := raw["customSetting"]; !ok {
+		t.Error("existing customSetting was not preserved")
+	}
+	// Verify hooks were added
+	if _, ok := raw["hooks"]; !ok {
+		t.Error("hooks were not added")
+	}
+}
+
+func TestIsEntireHook_RecognizesUserLevelHooks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		command string
+		want    bool
+	}{
+		{"entire hooks claude-code stop", true},
+		{"ENTIRE_USER_LEVEL_HOOK=1 entire hooks claude-code stop", true},
+		{"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claude-code stop", true},
+		{"echo hello", false},
+	}
+
+	for _, tt := range tests {
+		if got := isEntireHook(tt.command); got != tt.want {
+			t.Errorf("isEntireHook(%q) = %v, want %v", tt.command, got, tt.want)
+		}
+	}
+}
+
+func TestUninstallHooks_RemovesUserLevelHooks(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	claudeDir := filepath.Join(tempDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+
+	// Install user-level hooks
+	_, err := installHooksAt(settingsPath, userLevelHookEnvPrefix+"entire hooks claude-code ", false)
+	if err != nil {
+		t.Fatalf("installHooksAt() error = %v", err)
+	}
+
+	// Read the settings, parse, and remove
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
+		t.Fatal(err)
+	}
+
+	var rawHooks map[string]json.RawMessage
+	if err := json.Unmarshal(rawSettings["hooks"], &rawHooks); err != nil {
+		t.Fatal(err)
+	}
+
+	var stop []ClaudeHookMatcher
+	parseHookType(rawHooks, "Stop", &stop)
+
+	// Remove entire hooks (should match user-level prefix too)
+	stop = removeEntireHooks(stop)
+	if len(stop) != 0 {
+		t.Errorf("removeEntireHooks() left %d matchers, want 0", len(stop))
+	}
+}

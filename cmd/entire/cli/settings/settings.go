@@ -213,6 +213,18 @@ func applyDefaults(settings *EntireSettings) {
 	}
 }
 
+// Exists returns true if the Entire settings file (.entire/settings.json)
+// actually exists at the repository root. Unlike Load(), this does not
+// return default settings when the file is absent.
+func Exists() bool {
+	absPath, err := paths.AbsPath(EntireSettingsFile)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(absPath)
+	return err == nil
+}
+
 // IsSummarizeEnabled checks if auto-summarize is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsSummarizeEnabled() bool {

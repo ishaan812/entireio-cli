@@ -11,10 +11,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Ensure GeminiCLIAgent implements HookSupport and HookHandler
+// Ensure GeminiCLIAgent implements HookSupport, HookHandler, and UserLevelHookSupport
 var (
-	_ agent.HookSupport = (*GeminiCLIAgent)(nil)
-	_ agent.HookHandler = (*GeminiCLIAgent)(nil)
+	_ agent.HookSupport          = (*GeminiCLIAgent)(nil)
+	_ agent.HookHandler          = (*GeminiCLIAgent)(nil)
+	_ agent.UserLevelHookSupport = (*GeminiCLIAgent)(nil)
 )
 
 // Gemini CLI hook names - these become subcommands under `entire hooks gemini`
@@ -35,10 +36,14 @@ const (
 // GeminiSettingsFileName is the settings file used by Gemini CLI.
 const GeminiSettingsFileName = "settings.json"
 
+// userLevelHookEnvPrefix is prepended to hook commands installed at the user level.
+const userLevelHookEnvPrefix = "ENTIRE_USER_LEVEL_HOOK=1 "
+
 // entireHookPrefixes are command prefixes that identify Entire hooks
 var entireHookPrefixes = []string{
 	"entire ",
 	"go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go ",
+	userLevelHookEnvPrefix + "entire ",
 }
 
 // GetHookNames returns the hook verbs Gemini CLI supports.
@@ -482,4 +487,256 @@ func removeEntireHooks(matchers []GeminiHookMatcher) []GeminiHookMatcher {
 		}
 	}
 	return result
+}
+
+// userLevelSettingsPath returns the path to the user-level Gemini CLI settings file.
+func userLevelSettingsPath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".gemini", GeminiSettingsFileName), nil
+}
+
+// InstallUserLevelHooks installs Entire hooks at the user-level Gemini CLI settings
+// (~/.gemini/settings.json) as a fallback for when Gemini is started from a
+// repository subdirectory and cannot find project-level settings.
+// Hook commands are prefixed with ENTIRE_USER_LEVEL_HOOK=1 for deduplication.
+func (g *GeminiCLIAgent) InstallUserLevelHooks() (int, error) {
+	settingsPath, err := userLevelSettingsPath()
+	if err != nil {
+		return 0, err
+	}
+
+	return installUserLevelHooksAt(settingsPath)
+}
+
+// UninstallUserLevelHooks removes Entire hooks from user-level Gemini CLI settings.
+func (g *GeminiCLIAgent) UninstallUserLevelHooks() error {
+	settingsPath, err := userLevelSettingsPath()
+	if err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from home dir + fixed path
+	if err != nil {
+		return nil //nolint:nilerr // No settings file means nothing to uninstall
+	}
+
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
+		return fmt.Errorf("failed to parse user-level settings.json: %w", err)
+	}
+
+	var rawHooks map[string]json.RawMessage
+	if hooksRaw, ok := rawSettings["hooks"]; ok {
+		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+			return fmt.Errorf("failed to parse hooks in user-level settings.json: %w", err)
+		}
+	}
+	if rawHooks == nil {
+		return nil
+	}
+
+	var sessionStart, sessionEnd, beforeAgent, afterAgent []GeminiHookMatcher
+	var beforeModel, afterModel, beforeToolSelection []GeminiHookMatcher
+	var beforeTool, afterTool, preCompress, notification []GeminiHookMatcher
+	parseGeminiHookType(rawHooks, "SessionStart", &sessionStart)
+	parseGeminiHookType(rawHooks, "SessionEnd", &sessionEnd)
+	parseGeminiHookType(rawHooks, "BeforeAgent", &beforeAgent)
+	parseGeminiHookType(rawHooks, "AfterAgent", &afterAgent)
+	parseGeminiHookType(rawHooks, "BeforeModel", &beforeModel)
+	parseGeminiHookType(rawHooks, "AfterModel", &afterModel)
+	parseGeminiHookType(rawHooks, "BeforeToolSelection", &beforeToolSelection)
+	parseGeminiHookType(rawHooks, "BeforeTool", &beforeTool)
+	parseGeminiHookType(rawHooks, "AfterTool", &afterTool)
+	parseGeminiHookType(rawHooks, "PreCompress", &preCompress)
+	parseGeminiHookType(rawHooks, "Notification", &notification)
+
+	sessionStart = removeEntireHooks(sessionStart)
+	sessionEnd = removeEntireHooks(sessionEnd)
+	beforeAgent = removeEntireHooks(beforeAgent)
+	afterAgent = removeEntireHooks(afterAgent)
+	beforeModel = removeEntireHooks(beforeModel)
+	afterModel = removeEntireHooks(afterModel)
+	beforeToolSelection = removeEntireHooks(beforeToolSelection)
+	beforeTool = removeEntireHooks(beforeTool)
+	afterTool = removeEntireHooks(afterTool)
+	preCompress = removeEntireHooks(preCompress)
+	notification = removeEntireHooks(notification)
+
+	marshalGeminiHookType(rawHooks, "SessionStart", sessionStart)
+	marshalGeminiHookType(rawHooks, "SessionEnd", sessionEnd)
+	marshalGeminiHookType(rawHooks, "BeforeAgent", beforeAgent)
+	marshalGeminiHookType(rawHooks, "AfterAgent", afterAgent)
+	marshalGeminiHookType(rawHooks, "BeforeModel", beforeModel)
+	marshalGeminiHookType(rawHooks, "AfterModel", afterModel)
+	marshalGeminiHookType(rawHooks, "BeforeToolSelection", beforeToolSelection)
+	marshalGeminiHookType(rawHooks, "BeforeTool", beforeTool)
+	marshalGeminiHookType(rawHooks, "AfterTool", afterTool)
+	marshalGeminiHookType(rawHooks, "PreCompress", preCompress)
+	marshalGeminiHookType(rawHooks, "Notification", notification)
+
+	if len(rawHooks) > 0 {
+		hooksJSON, err := json.Marshal(rawHooks)
+		if err != nil {
+			return fmt.Errorf("failed to marshal hooks: %w", err)
+		}
+		rawSettings["hooks"] = hooksJSON
+	} else {
+		delete(rawSettings, "hooks")
+	}
+
+	output, err := json.MarshalIndent(rawSettings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
+	}
+	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
+		return fmt.Errorf("failed to write user-level settings.json: %w", err)
+	}
+	return nil
+}
+
+// AreUserLevelHooksInstalled checks if Entire hooks are installed at the user level.
+func (g *GeminiCLIAgent) AreUserLevelHooksInstalled() bool {
+	settingsPath, err := userLevelSettingsPath()
+	if err != nil {
+		return false
+	}
+	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from home dir + fixed path
+	if err != nil {
+		return false
+	}
+
+	var settings GeminiSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false
+	}
+
+	return hasEntireHook(settings.Hooks.SessionStart)
+}
+
+// installUserLevelHooksAt installs user-level Gemini hooks at the given settings path.
+func installUserLevelHooksAt(settingsPath string) (int, error) {
+	var rawSettings map[string]json.RawMessage
+	var rawHooks map[string]json.RawMessage
+	var hooksConfig GeminiHooksConfig
+
+	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from known safe paths
+	if readErr == nil {
+		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
+			return 0, fmt.Errorf("failed to parse settings.json: %w", err)
+		}
+		if hooksRaw, ok := rawSettings["hooks"]; ok {
+			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+				return 0, fmt.Errorf("failed to parse hooks in settings.json: %w", err)
+			}
+		}
+		if hooksConfigRaw, ok := rawSettings["hooksConfig"]; ok {
+			if err := json.Unmarshal(hooksConfigRaw, &hooksConfig); err != nil {
+				return 0, fmt.Errorf("failed to parse hooksConfig in settings.json: %w", err)
+			}
+		}
+	} else {
+		rawSettings = make(map[string]json.RawMessage)
+	}
+
+	if rawHooks == nil {
+		rawHooks = make(map[string]json.RawMessage)
+	}
+
+	hooksConfig.Enabled = true
+
+	cmdPrefix := userLevelHookEnvPrefix + "entire hooks gemini "
+
+	// Check for idempotency
+	var sessionStart []GeminiHookMatcher
+	parseGeminiHookType(rawHooks, "SessionStart", &sessionStart)
+	existingCmd := getFirstEntireHookCommand(sessionStart)
+	expectedCmd := cmdPrefix + "session-start"
+	if existingCmd == expectedCmd {
+		return 0, nil // Already installed
+	}
+
+	// Remove existing Entire hooks first (clean install)
+	var sessionEnd, beforeAgent, afterAgent []GeminiHookMatcher
+	var beforeModel, afterModel, beforeToolSelection []GeminiHookMatcher
+	var beforeTool, afterTool, preCompress, notification []GeminiHookMatcher
+
+	parseGeminiHookType(rawHooks, "SessionEnd", &sessionEnd)
+	parseGeminiHookType(rawHooks, "BeforeAgent", &beforeAgent)
+	parseGeminiHookType(rawHooks, "AfterAgent", &afterAgent)
+	parseGeminiHookType(rawHooks, "BeforeModel", &beforeModel)
+	parseGeminiHookType(rawHooks, "AfterModel", &afterModel)
+	parseGeminiHookType(rawHooks, "BeforeToolSelection", &beforeToolSelection)
+	parseGeminiHookType(rawHooks, "BeforeTool", &beforeTool)
+	parseGeminiHookType(rawHooks, "AfterTool", &afterTool)
+	parseGeminiHookType(rawHooks, "PreCompress", &preCompress)
+	parseGeminiHookType(rawHooks, "Notification", &notification)
+
+	sessionStart = removeEntireHooks(sessionStart)
+	sessionEnd = removeEntireHooks(sessionEnd)
+	beforeAgent = removeEntireHooks(beforeAgent)
+	afterAgent = removeEntireHooks(afterAgent)
+	beforeModel = removeEntireHooks(beforeModel)
+	afterModel = removeEntireHooks(afterModel)
+	beforeToolSelection = removeEntireHooks(beforeToolSelection)
+	beforeTool = removeEntireHooks(beforeTool)
+	afterTool = removeEntireHooks(afterTool)
+	preCompress = removeEntireHooks(preCompress)
+	notification = removeEntireHooks(notification)
+
+	// Install all hooks
+	sessionStart = addGeminiHook(sessionStart, "", "entire-session-start", cmdPrefix+"session-start")
+	sessionEnd = addGeminiHook(sessionEnd, "exit", "entire-session-end-exit", cmdPrefix+"session-end")
+	sessionEnd = addGeminiHook(sessionEnd, "logout", "entire-session-end-logout", cmdPrefix+"session-end")
+	beforeAgent = addGeminiHook(beforeAgent, "", "entire-before-agent", cmdPrefix+"before-agent")
+	afterAgent = addGeminiHook(afterAgent, "", "entire-after-agent", cmdPrefix+"after-agent")
+	beforeModel = addGeminiHook(beforeModel, "", "entire-before-model", cmdPrefix+"before-model")
+	afterModel = addGeminiHook(afterModel, "", "entire-after-model", cmdPrefix+"after-model")
+	beforeToolSelection = addGeminiHook(beforeToolSelection, "", "entire-before-tool-selection", cmdPrefix+"before-tool-selection")
+	beforeTool = addGeminiHook(beforeTool, "*", "entire-before-tool", cmdPrefix+"before-tool")
+	afterTool = addGeminiHook(afterTool, "*", "entire-after-tool", cmdPrefix+"after-tool")
+	preCompress = addGeminiHook(preCompress, "", "entire-pre-compress", cmdPrefix+"pre-compress")
+	notification = addGeminiHook(notification, "", "entire-notification", cmdPrefix+"notification")
+
+	count := 12
+
+	marshalGeminiHookType(rawHooks, "SessionStart", sessionStart)
+	marshalGeminiHookType(rawHooks, "SessionEnd", sessionEnd)
+	marshalGeminiHookType(rawHooks, "BeforeAgent", beforeAgent)
+	marshalGeminiHookType(rawHooks, "AfterAgent", afterAgent)
+	marshalGeminiHookType(rawHooks, "BeforeModel", beforeModel)
+	marshalGeminiHookType(rawHooks, "AfterModel", afterModel)
+	marshalGeminiHookType(rawHooks, "BeforeToolSelection", beforeToolSelection)
+	marshalGeminiHookType(rawHooks, "BeforeTool", beforeTool)
+	marshalGeminiHookType(rawHooks, "AfterTool", afterTool)
+	marshalGeminiHookType(rawHooks, "PreCompress", preCompress)
+	marshalGeminiHookType(rawHooks, "Notification", notification)
+
+	hooksConfigJSON, err := json.Marshal(hooksConfig)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal hooksConfig: %w", err)
+	}
+	rawSettings["hooksConfig"] = hooksConfigJSON
+
+	hooksJSON, err := json.Marshal(rawHooks)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
+	}
+	rawSettings["hooks"] = hooksJSON
+
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
+		return 0, fmt.Errorf("failed to create settings directory: %w", err)
+	}
+
+	output, err := json.MarshalIndent(rawSettings, "", "  ")
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal settings: %w", err)
+	}
+	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
+		return 0, fmt.Errorf("failed to write settings.json: %w", err)
+	}
+
+	return count, nil
 }

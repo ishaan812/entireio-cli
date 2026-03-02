@@ -537,3 +537,152 @@ func verifyHookCommand(t *testing.T, matchers []GeminiHookMatcher, expectedMatch
 	}
 	t.Errorf("hook with matcher=%q command=%q not found", expectedMatcher, expectedCommand)
 }
+
+// --- User-level hook tests ---
+
+func TestInstallUserLevelHooks_FreshInstall(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	settingsPath := filepath.Join(tempDir, ".gemini", "settings.json")
+
+	count, err := installUserLevelHooksAt(settingsPath)
+	if err != nil {
+		t.Fatalf("installUserLevelHooksAt() error = %v", err)
+	}
+	if count != 12 {
+		t.Errorf("installUserLevelHooksAt() count = %d, want 12", count)
+	}
+
+	// Verify settings file was created
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+
+	var settings GeminiSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+
+	// Check that hooks have the user-level env prefix
+	found := false
+	for _, matcher := range settings.Hooks.SessionStart {
+		for _, hook := range matcher.Hooks {
+			if hook.Command == "ENTIRE_USER_LEVEL_HOOK=1 entire hooks gemini session-start" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("expected user-level session-start hook with ENTIRE_USER_LEVEL_HOOK=1 prefix")
+	}
+
+	// Verify hooksConfig.enabled is true
+	if !settings.HooksConfig.Enabled {
+		t.Error("hooksConfig.enabled should be true")
+	}
+}
+
+func TestInstallUserLevelHooks_Idempotent(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	settingsPath := filepath.Join(tempDir, ".gemini", "settings.json")
+
+	// First install
+	_, err := installUserLevelHooksAt(settingsPath)
+	if err != nil {
+		t.Fatalf("first installUserLevelHooksAt() error = %v", err)
+	}
+
+	// Second install should return 0
+	count, err := installUserLevelHooksAt(settingsPath)
+	if err != nil {
+		t.Fatalf("second installUserLevelHooksAt() error = %v", err)
+	}
+	if count != 0 {
+		t.Errorf("second installUserLevelHooksAt() count = %d, want 0 (idempotent)", count)
+	}
+}
+
+func TestInstallUserLevelHooks_PreservesExistingSettings(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	geminiDir := filepath.Join(tempDir, ".gemini")
+	if err := os.MkdirAll(geminiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(geminiDir, "settings.json")
+	// Write existing user settings
+	if err := os.WriteFile(settingsPath, []byte(`{"customSetting": "value"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := installUserLevelHooksAt(settingsPath)
+	if err != nil {
+		t.Fatalf("installUserLevelHooksAt() error = %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify existing settings preserved
+	if _, ok := raw["customSetting"]; !ok {
+		t.Error("existing customSetting was not preserved")
+	}
+	// Verify hooks were added
+	if _, ok := raw["hooks"]; !ok {
+		t.Error("hooks were not added")
+	}
+}
+
+func TestIsEntireHook_RecognizesUserLevelHooks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		command string
+		want    bool
+	}{
+		{"entire hooks gemini session-start", true},
+		{"ENTIRE_USER_LEVEL_HOOK=1 entire hooks gemini session-start", true},
+		{"go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks gemini session-start", true},
+		{"echo hello", false},
+	}
+
+	for _, tt := range tests {
+		if got := isEntireHook(tt.command); got != tt.want {
+			t.Errorf("isEntireHook(%q) = %v, want %v", tt.command, got, tt.want)
+		}
+	}
+}
+
+func TestRemoveEntireHooks_RemovesUserLevelHooks(t *testing.T) {
+	t.Parallel()
+
+	matchers := []GeminiHookMatcher{
+		{
+			Hooks: []GeminiHookEntry{
+				{Name: "entire-session-start", Type: "command", Command: "ENTIRE_USER_LEVEL_HOOK=1 entire hooks gemini session-start"},
+			},
+		},
+		{
+			Matcher: "custom",
+			Hooks: []GeminiHookEntry{
+				{Name: "my-hook", Type: "command", Command: "echo hello"},
+			},
+		},
+	}
+
+	result := removeEntireHooks(matchers)
+	if len(result) != 1 {
+		t.Fatalf("removeEntireHooks() returned %d matchers, want 1", len(result))
+	}
+	if result[0].Matcher != "custom" {
+		t.Errorf("remaining matcher = %q, want %q", result[0].Matcher, "custom")
+	}
+}

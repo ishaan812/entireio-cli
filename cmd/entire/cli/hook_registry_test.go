@@ -302,6 +302,91 @@ func TestHookCommand_SetsCurrentHookAgentName(t *testing.T) {
 	}
 }
 
+func TestIsUserLevelHook(t *testing.T) {
+	t.Run("returns true when env var is set", func(t *testing.T) {
+		t.Setenv(UserLevelHookEnvVar, "1")
+		if !isUserLevelHook() {
+			t.Error("isUserLevelHook() = false, want true when ENTIRE_USER_LEVEL_HOOK=1")
+		}
+	})
+
+	t.Run("returns false when env var is not set", func(t *testing.T) {
+		// Ensure env var is not set (t.Setenv will restore original after test)
+		t.Setenv(UserLevelHookEnvVar, "")
+		if isUserLevelHook() {
+			t.Error("isUserLevelHook() = true, want false when env var is empty")
+		}
+	})
+}
+
+func TestShouldSkipUserLevelHook(t *testing.T) {
+	t.Run("returns false when not a user-level hook", func(t *testing.T) {
+		t.Setenv(UserLevelHookEnvVar, "")
+		if shouldSkipUserLevelHook() {
+			t.Error("shouldSkipUserLevelHook() = true, want false when not a user-level hook")
+		}
+	})
+
+	t.Run("returns true when user-level hook and CWD equals repo root", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+
+		// Initialize git repo
+		gitInit := exec.CommandContext(context.Background(), "git", "init")
+		if err := gitInit.Run(); err != nil {
+			t.Fatalf("failed to init git repo: %v", err)
+		}
+
+		t.Setenv(UserLevelHookEnvVar, "1")
+		if !shouldSkipUserLevelHook() {
+			t.Error("shouldSkipUserLevelHook() = false, want true when CWD equals repo root")
+		}
+	})
+
+	t.Run("returns false when user-level hook and CWD is subdirectory", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+
+		// Initialize git repo
+		gitInit := exec.CommandContext(context.Background(), "git", "init")
+		if err := gitInit.Run(); err != nil {
+			t.Fatalf("failed to init git repo: %v", err)
+		}
+
+		// Create and change to a subdirectory
+		subDir := filepath.Join(tmpDir, "src", "frontend")
+		if err := os.MkdirAll(subDir, 0o755); err != nil {
+			t.Fatalf("failed to create subdirectory: %v", err)
+		}
+		t.Chdir(subDir)
+
+		t.Setenv(UserLevelHookEnvVar, "1")
+		if shouldSkipUserLevelHook() {
+			t.Error("shouldSkipUserLevelHook() = true, want false when CWD is a subdirectory of repo root")
+		}
+	})
+}
+
+func TestGetHookType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		hookName string
+		want     string
+	}{
+		{claudecode.HookNamePreTask, "subagent"},
+		{claudecode.HookNamePostTask, "subagent"},
+		{claudecode.HookNamePostTodo, "subagent"},
+		{claudecode.HookNameStop, "agent"},
+		{claudecode.HookNameSessionStart, "agent"},
+	}
+
+	for _, tt := range tests {
+		if got := getHookType(tt.hookName); got != tt.want {
+			t.Errorf("getHookType(%q) = %q, want %q", tt.hookName, got, tt.want)
+		}
+	}
+}
+
 // writeTestSessionState creates a session state file in .git/entire-sessions/ for testing.
 func writeTestSessionState(t *testing.T, repoDir, sessionID string) {
 	t.Helper()

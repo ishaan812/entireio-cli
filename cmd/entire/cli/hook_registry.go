@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -85,6 +86,31 @@ func getHookType(hookName string) string {
 	}
 }
 
+// UserLevelHookEnvVar is the environment variable set for user-level fallback hooks.
+// When this env var is set, the hook handler checks whether project-level hooks
+// will also fire (CWD matches repo root) and skips if so to avoid double-execution.
+const UserLevelHookEnvVar = "ENTIRE_USER_LEVEL_HOOK"
+
+// isUserLevelHook returns true if this hook invocation is from a user-level fallback hook.
+func isUserLevelHook() bool {
+	return os.Getenv(UserLevelHookEnvVar) == "1"
+}
+
+// shouldSkipUserLevelHook returns true if this is a user-level hook that should be
+// skipped because project-level hooks will handle it. This happens when the agent's
+// CWD matches the repo root, meaning the agent found project-level settings.
+func shouldSkipUserLevelHook() bool {
+	if !isUserLevelHook() {
+		return false
+	}
+	cwd, cwdErr := os.Getwd() //nolint:forbidigo // Need actual CWD for dedup comparison
+	repoRoot, rootErr := paths.RepoRoot()
+	if cwdErr != nil || rootErr != nil {
+		return false // Can't determine, let the hook run
+	}
+	return cwd == repoRoot
+}
+
 // newAgentHookVerbCmdWithLogging creates a command for a specific hook verb with structured logging.
 // It uses the lifecycle dispatcher (ParseHookEvent → DispatchLifecycleEvent) as the primary path.
 // PostTodo is handled directly as it's Claude-specific and not part of the lifecycle dispatcher.
@@ -99,9 +125,21 @@ func newAgentHookVerbCmdWithLogging(agentName agent.AgentName, hookName string) 
 				return nil
 			}
 
+			// Skip if this is not an Entire project (.entire/settings.json doesn't exist).
+			// This guard is important for user-level fallback hooks which fire globally.
+			if !IsEntireProject() {
+				return nil
+			}
+
 			// Skip if Entire is not enabled
 			enabled, err := IsEnabled()
 			if err == nil && !enabled {
+				return nil
+			}
+
+			// Deduplicate user-level hooks: if the agent's CWD matches the repo root,
+			// project-level hooks will also fire, so skip the user-level invocation.
+			if shouldSkipUserLevelHook() {
 				return nil
 			}
 

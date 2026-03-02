@@ -126,6 +126,26 @@ type HookHandler interface {
 	GetHookNames() []string
 }
 
+// UserLevelHookSupport is implemented by agents that can install hooks at
+// the user level (~/.claude/settings.json, ~/.gemini/settings.json) as a
+// fallback for when agents are started from repository subdirectories and
+// cannot find project-level settings.
+type UserLevelHookSupport interface {
+	Agent
+
+	// InstallUserLevelHooks installs fallback hooks at the user-level settings file.
+	// These hooks include an environment variable prefix (ENTIRE_USER_LEVEL_HOOK=1)
+	// to enable deduplication with project-level hooks.
+	// Returns the number of hooks installed.
+	InstallUserLevelHooks() (int, error)
+
+	// UninstallUserLevelHooks removes Entire hooks from the user-level settings file.
+	UninstallUserLevelHooks() error
+
+	// AreUserLevelHooksInstalled checks if user-level hooks are currently installed.
+	AreUserLevelHooksInstalled() bool
+}
+
 // FileWatcher is implemented by agents that use file-based detection.
 // Agents like Aider that don't support hooks can use file watching
 // to detect session activity.

@@ -52,6 +52,14 @@ func SaveEntireSettingsLocal(s *settings.EntireSettings) error {
 	return nil
 }
 
+// IsEntireProject returns true if this repository has Entire configured.
+// Unlike IsEnabled(), this checks for the actual presence of .entire/settings.json,
+// not just loading defaults. Use this in hook handlers to avoid running in
+// non-Entire projects (e.g., when user-level fallback hooks fire globally).
+func IsEntireProject() bool {
+	return settings.Exists()
+}
+
 // IsEnabled returns whether Entire is currently enabled.
 // Returns true by default if settings cannot be loaded.
 func IsEnabled() (bool, error) {
