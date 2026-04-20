@@ -1,0 +1,46 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "d536280b7637",
+  "session_id": "acdd6566-6d05-4789-a858-68fd8ff687cf",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-20T23:17:59.59053202Z",
+  "branch": "claude/debug-opencode-plan-mode-rolEs",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "cmd/entire/cli/agent/opencode/lifecycle.go",
+    "cmd/entire/cli/agent/opencode/lifecycle_test.go",
+    "cmd/entire/cli/lifecycle.go",
+    "cmd/entire/cli/lifecycle_test.go"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "4cd33c26d5e2",
+  "token_usage": {
+    "input_tokens": 161,
+    "cache_creation_tokens": 96523,
+    "cache_read_tokens": 799162,
+    "output_tokens": 9773,
+    "api_call_count": 19
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-20T23:17:59.571939902Z",
+    "agent_lines": 1772,
+    "agent_removed": 459,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1772,
+    "total_lines_changed": 2231,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
