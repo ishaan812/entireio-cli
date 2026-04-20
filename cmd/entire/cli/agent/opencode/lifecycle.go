@@ -105,10 +105,18 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 		if err != nil {
 			return nil, err
 		}
+		// Include SessionRef so the lifecycle dispatcher can finalize the transcript
+		// at session-end time if turn-end was never delivered (e.g., plan-agent runs
+		// where session.status idle is not reliably emitted — see handleLifecycleSessionEnd).
+		transcriptPath, err := sessionTranscriptPath(ctx, raw.SessionID)
+		if err != nil {
+			return nil, err
+		}
 		return &agent.Event{
-			Type:      agent.SessionEnd,
-			SessionID: raw.SessionID,
-			Timestamp: time.Now(),
+			Type:       agent.SessionEnd,
+			SessionID:  raw.SessionID,
+			SessionRef: transcriptPath,
+			Timestamp:  time.Now(),
 		}, nil
 
 	default:

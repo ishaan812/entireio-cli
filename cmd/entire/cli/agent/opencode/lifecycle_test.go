@@ -160,6 +160,27 @@ func TestParseHookEvent_SessionEnd(t *testing.T) {
 	if event.Type != agent.SessionEnd {
 		t.Errorf("expected SessionEnd, got %v", event.Type)
 	}
+	// SessionRef must be populated so the lifecycle dispatcher can finalize an
+	// un-delivered turn at session-end (e.g., plan-agent sessions).
+	if !strings.HasSuffix(event.SessionRef, "sess-4.json") {
+		t.Errorf("expected session ref to end with 'sess-4.json', got %q", event.SessionRef)
+	}
+}
+
+func TestParseHookEvent_SessionEnd_InvalidSessionID(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id": "../escape"}`
+
+	_, err := ag.ParseHookEvent(context.Background(), HookNameSessionEnd, strings.NewReader(input))
+
+	if err == nil {
+		t.Fatal("expected error for path-traversal session ID")
+	}
+	if !strings.Contains(err.Error(), "contains path separators") {
+		t.Errorf("expected 'contains path separators' error, got: %v", err)
+	}
 }
 
 func TestParseHookEvent_UnknownHook(t *testing.T) {

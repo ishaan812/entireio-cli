@@ -622,6 +622,14 @@ func handleLifecycleCompaction(ctx context.Context, ag agent.Agent, event *agent
 }
 
 // handleLifecycleSessionEnd handles session end: marks the session as ended.
+//
+// Finalization fallback: if the agent never delivered a turn-end event for the
+// current turn (for example OpenCode's plan agent, where session.status idle is
+// not reliably emitted), the per-session transcript file will be missing. When
+// that happens and the SessionEnd event carries a usable transcript reference,
+// synthesize a TurnEnd and run the normal turn-end handler first so the
+// transcript, prompt, and checkpoint are still recorded. The fallback is gated
+// on the transcript file being absent, making it a no-op when turn-end fired.
 func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	logging.Info(logCtx, "session-end",
@@ -632,6 +640,8 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	if event.SessionID == "" {
 		return nil // No session to update
 	}
+
+	finalizeTurnOnSessionEnd(ctx, ag, event)
 
 	// Note: We intentionally don't clean up cached transcripts here.
 	// Post-session commits (carry-forward in ENDED phase) may still need
@@ -658,6 +668,47 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	}
 
 	return nil
+}
+
+// finalizeTurnOnSessionEnd runs the turn-end handler as a fallback when the
+// per-session transcript (full.jsonl) has not been written yet. This handles
+// agents that terminate a session without first emitting a reliable turn-end
+// event — notably OpenCode's plan agent, whose session.status idle emission is
+// not guaranteed. The fallback is a no-op when turn-end already succeeded
+// (full.jsonl exists) or when the event lacks a transcript reference.
+func finalizeTurnOnSessionEnd(ctx context.Context, ag agent.Agent, event *agent.Event) {
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+
+	if event.SessionRef == "" {
+		return
+	}
+
+	sessionDir := paths.SessionMetadataDirFromSessionID(event.SessionID)
+	sessionDirAbs, err := paths.AbsPath(ctx, sessionDir)
+	if err != nil {
+		sessionDirAbs = sessionDir
+	}
+	transcriptPath := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
+	if fileExists(transcriptPath) {
+		return
+	}
+
+	logging.Info(logCtx, "session-end finalizing turn (turn-end was not delivered)",
+		slog.String("session_id", event.SessionID),
+	)
+
+	synth := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  event.SessionID,
+		SessionRef: event.SessionRef,
+		Model:      event.Model,
+		Timestamp:  event.Timestamp,
+	}
+	if err := handleLifecycleTurnEnd(ctx, ag, synth); err != nil {
+		logging.Warn(logCtx, "session-end turn finalization failed",
+			slog.String("session_id", event.SessionID),
+			slog.String("error", err.Error()))
+	}
 }
 
 // handleLifecycleSubagentStart handles subagent start: captures pre-task state.
