@@ -1,0 +1,1 @@
+Can you make sure the session.end will not cause other issues in the entiore workflow in capturing will it fuck up build based workflows, if that event is reused someplace else?  Please make sure and after that please /simplify the code
