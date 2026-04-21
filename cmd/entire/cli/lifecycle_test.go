@@ -504,6 +504,101 @@ func TestHandleLifecycleSessionEnd_EmptySessionID(t *testing.T) {
 	}
 }
 
+// newSessionEndFinalizeEnv sets up an isolated git repo + mock preparer agent
+// for the session-end finalization tests. Returns the session ID and the
+// transcript reference the fallback would dispatch against. Callers cannot use
+// t.Parallel() because the helper uses t.Chdir.
+func newSessionEndFinalizeEnv(t *testing.T, sessionID string) (tmpDir, transcriptRef string, ag *mockPreparerAgent) {
+	t.Helper()
+
+	tmpDir = t.TempDir()
+	t.Chdir(tmpDir)
+	setupGitRepoWithCommit(t, tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	transcriptRef = filepath.Join(tmpDir, ".entire", "tmp", sessionID+".json")
+	ag = &mockPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-preparer",
+			agentType:      "Mock Preparer Agent",
+			transcriptData: []byte(`{"type":"user","message":"planning"}`),
+		},
+	}
+	return tmpDir, transcriptRef, ag
+}
+
+func TestHandleLifecycleSessionEnd_FinalizesTurnWhenTranscriptMissing(t *testing.T) {
+	tmpDir, transcriptRef, ag := newSessionEndFinalizeEnv(t, "plan-mode-sess")
+
+	event := &agent.Event{
+		Type:       agent.SessionEnd,
+		SessionID:  "plan-mode-sess",
+		SessionRef: transcriptRef,
+		Timestamp:  time.Now(),
+	}
+
+	if err := handleLifecycleSessionEnd(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleSessionEnd returned error: %v", err)
+	}
+
+	require.True(t, ag.prepareTranscriptCalled,
+		"expected PrepareTranscript to be invoked via the session-end fallback")
+
+	finalPath := filepath.Join(tmpDir, paths.SessionMetadataDirFromSessionID("plan-mode-sess"), paths.TranscriptFileName)
+	if _, err := os.Stat(finalPath); err != nil {
+		t.Fatalf("expected session-end fallback to write %s: %v", finalPath, err)
+	}
+}
+
+func TestHandleLifecycleSessionEnd_SkipsFinalizeWhenTranscriptExists(t *testing.T) {
+	tmpDir, transcriptRef, ag := newSessionEndFinalizeEnv(t, "build-mode-sess")
+
+	// Pre-write full.jsonl to simulate turn-end having already succeeded.
+	metaDir := filepath.Join(tmpDir, paths.SessionMetadataDirFromSessionID("build-mode-sess"))
+	require.NoError(t, os.MkdirAll(metaDir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(metaDir, paths.TranscriptFileName),
+		[]byte(`{"type":"user","message":"already written"}`),
+		0o600,
+	))
+
+	event := &agent.Event{
+		Type:       agent.SessionEnd,
+		SessionID:  "build-mode-sess",
+		SessionRef: transcriptRef,
+		Timestamp:  time.Now(),
+	}
+
+	if err := handleLifecycleSessionEnd(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleSessionEnd returned error: %v", err)
+	}
+
+	require.False(t, ag.prepareTranscriptCalled,
+		"PrepareTranscript must not be called when full.jsonl already exists")
+}
+
+func TestHandleLifecycleSessionEnd_NoFinalizeWhenSessionRefEmpty(t *testing.T) {
+	t.Parallel()
+
+	ag := &mockPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:      "mock-preparer",
+			agentType: "Mock Preparer Agent",
+		},
+	}
+	event := &agent.Event{
+		Type:      agent.SessionEnd,
+		SessionID: "any-session",
+	}
+
+	if err := handleLifecycleSessionEnd(context.Background(), ag, event); err != nil {
+		t.Fatalf("handleLifecycleSessionEnd returned error: %v", err)
+	}
+
+	require.False(t, ag.prepareTranscriptCalled,
+		"PrepareTranscript must not be called when SessionRef is empty")
+}
+
 // --- resolveTranscriptOffset tests ---
 
 func TestResolveTranscriptOffset_PrefersPrePromptState(t *testing.T) {
