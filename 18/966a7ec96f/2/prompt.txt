@@ -1,0 +1,3 @@
+_GEMINI_API_KEY=REDACTED
+
+Use gemini key to test, also push and commit changes to branch so i will be able to see the session appear on the github shadow branch
