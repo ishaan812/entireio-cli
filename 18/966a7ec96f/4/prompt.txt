@@ -1,0 +1,1 @@
+"Create a file at .opencode/plans/e2e-test.md with: '# E2E test\nThis file was written by opencode + entireio-cli to validate session recording.\n'. Use the write tool. Do not ask for confirmation."
