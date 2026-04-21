@@ -1,0 +1,25 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "18966a7ec96f",
+  "strategy": "manual-commit",
+  "branch": "claude/debug-opencode-plan-mode-rolEs",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".opencode/plans/e2e-test.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/18/966a7ec96f/0/metadata.json",
+      "transcript": "/18/966a7ec96f/0/full.jsonl",
+      "content_hash": "/18/966a7ec96f/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  }
+}
