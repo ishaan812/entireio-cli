@@ -1,0 +1,1 @@
+How do i test this fully have you tetsed with opencode preprly maybe you can in opencode there are free models which you can use to test, can you do proper e2e test if its being recorded
